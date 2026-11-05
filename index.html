@@ -242,6 +242,25 @@ function stats(arr) {
   let consts = null, backend = '';
   let modelReady = false;
 
+  // ---------- 診断: ORT の警告を拾う / #profile で GPU カーネル時間を集計 ----------
+  const DIAG = location.hash === '#profile';
+  const ortLogs = [], prof = [];
+  for (const k of ['log', 'warn', 'error']) {
+    const orig = console[k].bind(console);
+    console[k] = (...a) => {
+      const s = a.map(v => (v && v.message) || String(v)).join(' ');
+      if (/onnxruntime|not assigned|\[W:|\[E:|ExecutionProvider|fallback/i.test(s) && ortLogs.length < 40) ortLogs.push(s.slice(0, 300));
+      orig(...a);
+    };
+  }
+  function profSummary(label, wallMs) {
+    if (!prof.length) return `${label}: プロファイルデータなし（timestamp-query 非対応の可能性）`;
+    const by = {}; let total = 0;
+    for (const d of prof) { const t = (d.endTime - d.startTime) / 1e6; total += t; by[d.kernelType] = (by[d.kernelType] || 0) + t; }
+    const top = Object.entries(by).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(', ');
+    return `${label}: 実時間 ${wallMs.toFixed(0)}ms / GPU 合計 ${total.toFixed(0)}ms / カーネル ${prof.length} 個 / 上位: ${top}`;
+  }
+
   // ---------- ユーティリティ ----------
   const ms = v => Number.isFinite(v) ? v.toFixed(0) + ' ms' : '—';
   const sec = v => (v / 1000).toFixed(1) + ' 秒';
@@ -343,6 +362,7 @@ function stats(arr) {
     const bump = n => { got += n; $('modelBar').style.width = Math.min(100, got / TOTAL * 100).toFixed(1) + '%'; setState($('modelState'), `${(got / 1048576).toFixed(1)} / 83 MB`); };
     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
     ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
+    if (DIAG) ort.env.webgpu.profiling = { mode: 'default', ondata: d => prof.push(d) };
     const t0 = performance.now();
     try {
       consts = await (await fetch(REPO + 'constants.json')).json();
@@ -523,10 +543,19 @@ function stats(arr) {
     try {
       setState($('targetState'), '推論中…');
       const t0 = performance.now();
-      if (!seedEnc || seedEnc.src !== video.src) { seedEnc = await encode(); seedEnc.src = video.src; R.seedEncMs = performance.now() - t0; }
+      if (!seedEnc || seedEnc.src !== video.src) {
+        prof.length = 0;
+        seedEnc = await encode(); seedEnc.src = video.src; R.seedEncMs = performance.now() - t0;
+        if (DIAG) {   // 2回目はシェーダ準備が済んでいるので、こちらを集計する
+          prof.length = 0; const a = performance.now(); await encode();
+          R.profEnc = profSummary('画像エンコーダ(2回目)', performance.now() - a);
+        }
+      }
       const t1 = performance.now();
+      prof.length = 0;
       seedOut = await decode(seedEnc, seedEnc.feats2NoMem, points);
       R.seedDecMs = performance.now() - t1;
+      if (DIAG) R.profDec = profSummary('マスクデコーダ', R.seedDecMs);
       drawView(seedOut.mask);
       setState($('targetState'), `マスク ${(seedOut.area / 655.36).toFixed(1)}%（エンコード ${ms(R.seedEncMs)} / デコード ${ms(R.seedDecMs)}）`, 'ok');
     } catch (e) { setState($('targetState'), '失敗', 'bad'); R.seedError = e.message; writeReport(); alertBox(e.message); }
@@ -552,7 +581,7 @@ function stats(arr) {
       const enc0 = seedEnc.src === video.src ? seedEnc : await encode();
       const cm = await memEncode(enc0.feats2, seedOut, 1);
       const cond = { frame: 0, tokens: cm.tokens, pos: cm.pos, ptr: seedOut.ptr };
-      let lost = 0;
+      let lost = 0; const lostIdx = [], areas = [];
       for (let i = 1; i < totalFrames && !stopFlag; i++) {
         const f0 = performance.now();
         await seekTo(frameTime(i)); const f1 = performance.now();
@@ -562,6 +591,8 @@ function stats(arr) {
         const pt = await run('pointer_tpos', { normalized_diffs: tensor(sess.pointer_tpos, 'normalized_diffs', pl.diffs, [16]) });
         writePointers(pl.list, asF32(pick(pt, 'pointer_pos', 'pointer_tpos')), mem, pos, Rlen);
         const a = sess.memory_attention, L = Rlen + 64;
+        if (DIAG && i === 3) prof.length = 0;
+        const attT0 = performance.now();
         const att = await run('memory_attention', {
           current_vision_features: tensor(a, 'current_vision_features', chwToTokens(enc.feats2, 256), [F2, 1, 256]),
           current_vision_position_embeddings: tensor(a, 'current_vision_position_embeddings', chwToTokens(enc.vpos, 256), [F2, 1, 256]),
@@ -569,13 +600,15 @@ function stats(arr) {
           memory_pos: tensor(a, 'memory_pos', pos, [L, 1, 64]),
         });
         const f3 = performance.now();
+        if (DIAG && i === 3) R.profAttn = profSummary('メモリ注意', f3 - attT0);
         const dec = await decode(enc, asF32(pick(att, 'conditioned_feats', 'memory_attention')), []);
         const f4 = performance.now();
         const me = await memEncode(enc.feats2, dec, 0);
         const f5 = performance.now();
         recent.set(i, { tokens: me.tokens, pos: me.pos }); recentPtrs.set(i, dec.ptr);
         recent.delete(i - 7); recentPtrs.delete(i - MAX_PTRS);
-        if (dec.score <= 0) lost++;
+        if (dec.score <= 0) { lost++; lostIdx.push(i); }
+        areas.push((dec.area / 655.36).toFixed(0));
         masks.push(dec.mask);
         T.seek.push(f1 - f0); T.enc.push(f2 - f1); T.attn.push(f3 - f2); T.dec.push(f4 - f3); T.menc.push(f5 - f4); T.frame.push(f5 - f0);
         drawView(dec.mask);
@@ -585,7 +618,7 @@ function stats(arr) {
         setState($('runState'), `${i + 1} / ${totalFrames}`);
         setList($('runList'), [['1フレーム（平均）', ms(steady.avg)], ['残り', sec(eta)], ['対象を見失ったフレーム', String(lost)]]);
         lsSet(RUNKEY, { status: 'running', frame: i + 1, total: totalFrames, at: Date.now() });
-        R.track = { T, done: i + 1, total: totalFrames, wallMs: performance.now() - startedAt, lost, fps };
+        R.track = { T, done: i + 1, total: totalFrames, wallMs: performance.now() - startedAt, lost, lostIdx, areas, fps };
       }
       R.track && (R.track.stopped = stopFlag);
       lsSet(RUNKEY, { status: 'done' });
@@ -622,11 +655,15 @@ function stats(arr) {
       for (const [k, n] of [['frame', '1フレーム合計'], ['seek', 'シーク'], ['enc', '画像エンコーダ'], ['attn', 'メモリ注意'], ['dec', 'マスクデコーダ'], ['menc', 'メモリエンコーダ']]) {
         const s = st(k); L.push(`  ${n}: 平均 ${ms(s.avg)} / 中央値 ${ms(s.p50)} / 最大 ${ms(s.max)}`);
       }
+      if (t.lostIdx.length) L.push(`見失ったフレーム: ${t.lostIdx.slice(0, 40).join(',')}${t.lostIdx.length > 40 ? ' …' : ''}`);
+      L.push(`マスク面積%(5フレームごと): ${t.areas.filter((_, k) => k % 5 === 0).join(',')}`);
       const per = st('frame').avg;
       if (per) L.push(`→ 10秒・30fps(300フレーム)なら約 ${sec(per * 300)}、15fps なら約 ${sec(per * 150)}`);
     }
     if (R.trackError) L.push(`トラッキングエラー: ${R.trackError}`);
     if (R.crash) L.push(`前回の実行: ${R.crash}`);
+    if (DIAG) L.push('## 診断', R.profEnc || '画像エンコーダ: 未計測', R.profDec || 'マスクデコーダ: 未計測', R.profAttn || 'メモリ注意: 未計測（4フレーム目で計測）');
+    L.push(`ORT ログ(${ortLogs.length}件):`, ...[...new Set(ortLogs)].slice(0, 15).map(s => '  ' + s));
     $('report').value = L.join('\n');
   }
   $('copy').onclick = async () => {
@@ -653,4 +690,3 @@ function stats(arr) {
 </script>
 </body>
 </html>
-
