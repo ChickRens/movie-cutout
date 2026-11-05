@@ -107,6 +107,9 @@ input[type=range] { width: 100%; accent-color: var(--key); }
       <button id="modePos" type="button" aria-pressed="true">含める</button>
       <button id="modeNeg" type="button" aria-pressed="false">除外する</button>
       <button id="resetPts" type="button">点をリセット</button>
+      <label for="padPt">詰め点
+        <select id="padPt"><option value="off" selected>なし</option><option value="on">あり</option></select>
+      </label>
     </div>
     <div class="stage"><canvas id="view" width="640" height="360"></canvas></div>
     <p class="hint">最初のフレームで対象をタップすると、すぐにマスクが表示されます。</p>
@@ -490,7 +493,8 @@ function stats(arr) {
     for (let i = 0; i < 65536; i++) { const on = mask[i]; img.data[i * 4] = rgb[0]; img.data[i * 4 + 1] = rgb[1]; img.data[i * 4 + 2] = rgb[2]; img.data[i * 4 + 3] = on ? a : 0; }
     mctx.putImageData(img, 0, 0);
   }
-  $('showMode').onchange = () => { if (!running) drawView(currentMask()); };
+  $('padPt').onchange = () => { R.pad = $('padPt').value; if (modelReady && seedEnc && points.length) segmentSeed(); };
+  $('showMode').onchange =() => { if (!running) drawView(currentMask()); };
   function currentMask() { return scrubMasks.length ? scrubMasks[Number($('scrub').value)] : seedOut && seedOut.mask; }
 
   function grabPixels() {
@@ -509,7 +513,8 @@ function stats(arr) {
   async function decode(enc, featsCond, pts) {
     const coords = [], labels = [];
     for (const p of pts) { coords.push(p.x * 512, p.y * 512); labels.push(p.l); }
-    coords.push(0, 0); labels.push(-1);           // 箱なしのときの SAM の詰め点
+    // 追跡フレームは詰め点1つだけを渡す。最初のフレームは切り替えで比較する
+    if (!pts.length || $('padPt').value === 'on') { coords.push(0, 0); labels.push(-1); }
     const N = labels.length, d = sess.mask_decoder;
     const out = await run('mask_decoder', {
       feats0: enc.feats0, feats1: enc.feats1,
@@ -641,7 +646,7 @@ function stats(arr) {
   // ---------- 6. レポート ----------
   function writeReport() {
     const L = [];
-    L.push('# SAM2 動画スパイク結果', `日時: ${new Date().toLocaleString('ja-JP')}`, `UA: ${R.ua}`);
+    L.push('# SAM2 動画スパイク結果 (v3)', `詰め点: ${$('padPt').value}`,`日時: ${new Date().toLocaleString('ja-JP')}`, `UA: ${R.ua}`);
     L.push(`WebGPU: ${R.webgpu ? 'あり' : 'なし'} / shader-f16: ${R.f16 ? 'あり' : 'なし'} / GPU: ${R.gpu || '-'} / 実行方式: ${R.backend}`);
     if (R.model) L.push(`モデル: ${R.model.fromCache ? 'キャッシュ' : 'ネットワーク'} 取得 ${sec(R.model.readMs)} + セッション作成 ${sec(R.model.createMs)} = ${sec(R.model.totalMs)}`);
     if (R.modelError) L.push(`モデル読み込みエラー: ${R.modelError}`);
