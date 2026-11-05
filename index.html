@@ -246,7 +246,8 @@ function stats(arr) {
   let modelReady = false;
 
   // ---------- 診断: ORT の警告を拾う / #profile で GPU カーネル時間を集計 ----------
-  const DIAG = location.hash === '#profile';
+  const FLAGS = location.hash.slice(1).split(',');
+  const DIAG = FLAGS.includes('profile'), FORCE_CPU = FLAGS.includes('cpu');
   const ortLogs = [], prof = [];
   for (const k of ['log', 'warn', 'error']) {
     const orig = console[k].bind(console);
@@ -335,7 +336,7 @@ function stats(arr) {
         } else { R.webgpu = false; pairs.push(['WebGPU', 'API はあるがアダプタ取得に失敗']); }
       } catch (e) { R.webgpu = false; pairs.push(['WebGPU', '失敗: ' + e.message]); }
     } else pairs.push(['WebGPU', 'なし（CPU / WASM で実行。iOS 26 未満ではこちら）']);
-    backend = R.webgpu ? 'webgpu' : 'wasm';
+    backend = R.webgpu && !FORCE_CPU ? 'webgpu' : 'wasm';
     R.backend = backend;
     pairs.push(['実行方式', backend]);
     setList($('envList'), pairs);
@@ -501,8 +502,14 @@ function stats(arr) {
     ictx.drawImage(video, 0, 0, 512, 512);
     return toPixelValues(ictx.getImageData(0, 0, 512, 512).data, consts.image_mean, consts.image_std);
   }
+  let grabPixelsCache = null;
+  function numStats(name, a) {
+    let mn = Infinity, mx = -Infinity, sum = 0, bad = 0;
+    for (let i = 0; i < a.length; i++) { const v = a[i]; if (!Number.isFinite(v)) { bad++; continue; } if (v < mn) mn = v; if (v > mx) mx = v; sum += v; }
+    return `${name}: min ${mn.toFixed(3)} / max ${mx.toFixed(3)} / 平均 ${(sum / Math.max(1, a.length - bad)).toFixed(4)} / NaN・Inf ${bad}個`;
+  }
   async function encode() {
-    const pix = grabPixels();
+    const pix = grabPixels(); grabPixelsCache = pix;
     const out = await run('vision_encoder', { pixel_values: tensor(sess.vision_encoder, 'pixel_values', pix, [1, 3, 512, 512]) });
     return {
       feats0: pick(out, 'feats0', 'vision_encoder'), feats1: pick(out, 'feats1', 'vision_encoder'),
@@ -526,7 +533,7 @@ function stats(arr) {
     const mask = new Uint8Array(65536); let area = 0;
     for (let i = 0; i < 65536; i++) if (low[i] > 0) { mask[i] = 1; area++; }
     return {
-      mask, area, highRes: asF32(pick(out, 'high_res_mask', 'mask_decoder')),
+      mask, area, low, iou: asF32(pick(out, 'iou', 'mask_decoder'))[0], highRes: asF32(pick(out, 'high_res_mask', 'mask_decoder')),
       score: asF32(pick(out, 'object_score_logits', 'mask_decoder'))[0],
       ptr: asF32(pick(out, 'object_pointer', 'mask_decoder')).slice(0, 256),
     };
@@ -560,6 +567,13 @@ function stats(arr) {
       prof.length = 0;
       seedOut = await decode(seedEnc, seedEnc.feats2NoMem, points);
       R.seedDecMs = performance.now() - t1;
+      R.num = [
+        numStats('pixel_values', grabPixelsCache),
+        numStats('feats2_no_mem', seedEnc.feats2NoMem),
+        numStats('vision_pos_embed', seedEnc.vpos),
+        numStats('low_res_mask', seedOut.low),
+        `iou=${seedOut.iou.toFixed(3)} object_score=${seedOut.score.toFixed(3)} 点=${JSON.stringify(points.map(p => [Math.round(p.x * 512), Math.round(p.y * 512), p.l]))}`,
+      ];
       if (DIAG) R.profDec = profSummary('マスクデコーダ', R.seedDecMs);
       drawView(seedOut.mask);
       setState($('targetState'), `マスク ${(seedOut.area / 655.36).toFixed(1)}%（エンコード ${ms(R.seedEncMs)} / デコード ${ms(R.seedDecMs)}）`, 'ok');
@@ -646,7 +660,7 @@ function stats(arr) {
   // ---------- 6. レポート ----------
   function writeReport() {
     const L = [];
-    L.push('# SAM2 動画スパイク結果 (v3)', `詰め点: ${$('padPt').value}`,`日時: ${new Date().toLocaleString('ja-JP')}`, `UA: ${R.ua}`);
+    L.push('# SAM2 動画スパイク結果 (v4)', `詰め点: ${$('padPt').value}`,`日時: ${new Date().toLocaleString('ja-JP')}`, `UA: ${R.ua}`);
     L.push(`WebGPU: ${R.webgpu ? 'あり' : 'なし'} / shader-f16: ${R.f16 ? 'あり' : 'なし'} / GPU: ${R.gpu || '-'} / 実行方式: ${R.backend}`);
     if (R.model) L.push(`モデル: ${R.model.fromCache ? 'キャッシュ' : 'ネットワーク'} 取得 ${sec(R.model.readMs)} + セッション作成 ${sec(R.model.createMs)} = ${sec(R.model.totalMs)}`);
     if (R.modelError) L.push(`モデル読み込みエラー: ${R.modelError}`);
@@ -667,6 +681,7 @@ function stats(arr) {
     }
     if (R.trackError) L.push(`トラッキングエラー: ${R.trackError}`);
     if (R.crash) L.push(`前回の実行: ${R.crash}`);
+    if (R.num) L.push('## 数値チェック（最初のタップ）', ...R.num);
     if (DIAG) L.push('## 診断', R.profEnc || '画像エンコーダ: 未計測', R.profDec || 'マスクデコーダ: 未計測', R.profAttn || 'メモリ注意: 未計測（4フレーム目で計測）');
     L.push(`ORT ログ(${ortLogs.length}件):`, ...[...new Set(ortLogs)].slice(0, 15).map(s => '  ' + s));
     $('report').value = L.join('\n');
