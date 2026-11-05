@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SAM2 動画スパイク</title>
+<style>
+/* 使い捨ての計測ページ。上から順に 環境 → モデル → 動画 → 対象 → 実行 → レポート の一列構成 */
+:root {
+  --bg: #f3f5f2;
+  --surface: #ffffff;
+  --fg: #1b211c;
+  --muted: #5d6a60;
+  --line: #d6ddd5;
+  --key: #00a03b;          /* 放送用クロマグリーン寄り */
+  --key-ink: #ffffff;
+  --warn: #b25b00;
+  --bad: #c0262d;
+  --font: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121512; --surface: #1b1f1b; --fg: #e7ece6; --muted: #98a597;
+    --line: #2e352e; --key: #2fd36a; --key-ink: #08210f; --warn: #f0a24a; --bad: #ff6b70;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--fg); font: 15px/1.55 var(--font);
+  padding-block: max(16px, env(safe-area-inset-top, 0px)) max(32px, env(safe-area-inset-bottom, 0px));
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+main { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+h1 { font-size: 1.35rem; margin: 0; text-wrap: balance; }
+h1 small { display: block; font-size: .8rem; font-weight: 500; color: var(--muted); }
+section { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+section h2 { font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0; display: flex; justify-content: space-between; gap: 8px; }
+.state { font-family: var(--mono); letter-spacing: 0; text-transform: none; }
+.state.ok { color: var(--key); } .state.warn { color: var(--warn); } .state.bad { color: var(--bad); }
+dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: .9rem; }
+dt { color: var(--muted); } dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: anywhere; }
+.bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0%; background: var(--key); transition: width .2s; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button, select, input[type=file] { font: inherit; }
+button {
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  padding: 9px 14px; border-radius: 8px; cursor: pointer; min-height: 40px;
+}
+button.primary { background: var(--key); border-color: var(--key); color: var(--key-ink); font-weight: 600; }
+button[aria-pressed=true] { outline: 2px solid var(--key); outline-offset: -2px; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--key); outline-offset: 2px; }
+label { display: flex; gap: 6px; align-items: center; font-size: .9rem; }
+select { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+.stage { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
+.stage canvas { display: block; width: 100%; height: auto; touch-action: manipulation; }
+.hint { font-size: .85rem; color: var(--muted); margin: 0; }
+.alert { border-left: 4px solid var(--warn); padding: 8px 10px; background: var(--bg); font-size: .9rem; border-radius: 4px; }
+.alert.bad { border-left-color: var(--bad); }
+textarea { width: 100%; min-height: 220px; font: 12px/1.45 var(--mono); background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+input[type=range] { width: 100%; accent-color: var(--key); }
+@media (prefers-reduced-motion: reduce) { .bar > i { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>SAM2 動画切り抜き スパイク<small>使い捨ての計測ページ。結果レポートをコピーしてチャットに貼ってください。</small></h1>
+
+  <div id="crashNote" class="alert bad" hidden></div>
+
+  <section id="secEnv">
+    <h2>1. 環境 <span id="envState" class="state">確認中</span></h2>
+    <dl id="envList"></dl>
+  </section>
+
+  <section id="secModel">
+    <h2>2. モデル <span id="modelState" class="state">待機</span></h2>
+    <div class="bar"><i id="modelBar"></i></div>
+    <dl id="modelList"></dl>
+    <p class="hint">ページを開いた時点で裏で読み込みを始めます。2回目以降はブラウザのキャッシュから読みます。</p>
+    <div class="row"><button id="clearCache" type="button">キャッシュを消して再計測</button></div>
+  </section>
+
+  <section id="secVideo">
+    <h2>3. 動画 <span id="videoState" class="state">未選択</span></h2>
+    <input id="file" type="file" accept="video/*">
+    <div class="row">
+      <label for="secs">処理する秒数
+        <select id="secs"><option>3</option><option>5</option><option selected>10</option></select>
+      </label>
+      <label for="fps">処理 fps
+        <select id="fps"><option>10</option><option selected>15</option><option>30</option></select>
+      </label>
+    </div>
+    <dl id="videoList"></dl>
+  </section>
+
+  <section id="secTarget">
+    <h2>4. 切り抜く対象をタップ <span id="targetState" class="state">—</span></h2>
+    <div class="row" role="group" aria-label="タップの種類">
+      <button id="modePos" type="button" aria-pressed="true">含める</button>
+      <button id="modeNeg" type="button" aria-pressed="false">除外する</button>
+      <button id="resetPts" type="button">点をリセット</button>
+    </div>
+    <div class="stage"><canvas id="view" width="640" height="360"></canvas></div>
+    <p class="hint">最初のフレームで対象をタップすると、すぐにマスクが表示されます。</p>
+  </section>
+
+  <section id="secRun">
+    <h2>5. トラッキング <span id="runState" class="state">—</span></h2>
+    <div class="row">
+      <button id="start" class="primary" type="button" disabled>トラッキング開始</button>
+      <button id="stop" type="button" disabled>中止</button>
+      <label for="showMode">表示
+        <select id="showMode"><option value="overlay">重ねる</option><option value="green">グリーンバック</option></select>
+      </label>
+    </div>
+    <div class="bar"><i id="runBar"></i></div>
+    <dl id="runList"></dl>
+    <input id="scrub" type="range" min="0" max="0" value="0" hidden aria-label="結果のフレーム">
+  </section>
+
+  <section id="secReport">
+    <h2>6. 結果レポート</h2>
+    <textarea id="report" readonly></textarea>
+    <div class="row"><button id="copy" class="primary" type="button">レポートをコピー</button><span id="copied" class="hint"></span></div>
+  </section>
+</main>
+
+<video id="video" muted playsinline preload="auto" hidden></video>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.all.min.js"></script>
+<script>
+// ==CORE== (純粋関数。Nodeで単体確認する)
+const S = 512, F = 32, F2 = F * F, MEM_FRAMES = 7, MAX_PTRS = 16;
+
+// feats [1,C,F,F] (CHW) → [F²,1,C] (HWC)
+function chwToTokens(src, C) {
+  const out = new Float32Array(F2 * C);
+  for (let c = 0; c < C; c++) {
+    const base = c * F2;
+    for (let p = 0; p < F2; p++) out[p * C + c] = src[base + p];
+  }
+  return out;
+}
+
+// メモリバンクの組み立て
+//   cond: {frame, tokens, pos, ptr}  recent: Map(frame → {tokens,pos,ptr})
+//   tpos: 7×64 の時間位置埋め込み表。条件フレームは行6、k フレーム前は行 k-1
+function assembleMemory(t, cond, recent, tpos) {
+  const blocks = [{ m: cond, row: 6 }];
+  for (let k = 1; k <= 6; k++) {
+    const f = t - k;
+    if (f < 0) break;
+    if (f === cond.frame) continue;
+    const m = recent.get(f);
+    if (m) blocks.push({ m, row: k - 1 });
+  }
+  const real = blocks.length;
+  const mostRecent = blocks.length > 1 ? blocks[1] : blocks[0];
+  while (blocks.length < MEM_FRAMES) blocks.push(mostRecent);
+  const R = MEM_FRAMES * F2;
+  const mem = new Float32Array((R + MAX_PTRS * 4) * 64);
+  const pos = new Float32Array((R + MAX_PTRS * 4) * 64);
+  blocks.forEach((b, i) => {
+    mem.set(b.m.tokens, i * F2 * 64);
+    const tp = tpos[b.row];
+    for (let p = 0; p < F2; p++) {
+      const o = (i * F2 + p) * 64;
+      for (let d = 0; d < 64; d++) pos[o + d] = b.m.pos[p * 64 + d] + tp[d];
+    }
+  });
+  return { mem, pos, R, realBlocks: real };
+}
+
+// オブジェクトポインタの並び（条件フレーム → 1,2,…フレーム前）と正規化した時間差
+function pointerList(t, totalFrames, cond, recentPtrs) {
+  const maxPtrs = Math.min(totalFrames, MAX_PTRS);
+  const denom = Math.max(maxPtrs - 1, 1);
+  const list = [{ ptr: cond.ptr, diff: Math.abs(t - cond.frame) }];
+  for (let d = 1; d < maxPtrs; d++) {
+    const f = t - d;
+    if (f < 0) break;
+    if (f === cond.frame) continue;
+    const p = recentPtrs.get(f);
+    if (p) list.push({ ptr: p, diff: d });
+  }
+  const real = list.length;
+  const mostRecent = list.length > 1 ? list[1] : list[0];
+  while (list.length < MAX_PTRS) list.push(mostRecent);
+  const diffs = new Float32Array(MAX_PTRS);
+  list.forEach((e, i) => { diffs[i] = e.diff / denom; });
+  return { list, diffs, realPtrs: real };
+}
+
+// ポインタ 16×256 を 64 トークン×64次元 へ。位置埋め込みは各ポインタを4回繰り返す
+function writePointers(list, ptrPos, mem, pos, R) {
+  list.forEach((e, i) => {
+    for (let j = 0; j < 4; j++) {
+      const o = (R + i * 4 + j) * 64;
+      for (let d = 0; d < 64; d++) {
+        mem[o + d] = e.ptr[j * 64 + d];
+        pos[o + d] = ptrPos[i * 64 + d];
+      }
+    }
+  });
+}
+
+// RGBA (S×S) → 正規化した CHW
+function toPixelValues(rgba, mean, std) {
+  const out = new Float32Array(3 * S * S);
+  for (let i = 0; i < S * S; i++) {
+    out[i] = (rgba[i * 4] / 255 - mean[0]) / std[0];
+    out[S * S + i] = (rgba[i * 4 + 1] / 255 - mean[1]) / std[1];
+    out[2 * S * S + i] = (rgba[i * 4 + 2] / 255 - mean[2]) / std[2];
+  }
+  return out;
+}
+
+function stats(arr) {
+  if (!arr.length) return { avg: NaN, p50: NaN, max: NaN };
+  const s = [...arr].sort((a, b) => a - b);
+  return { avg: arr.reduce((a, b) => a + b, 0) / arr.length, p50: s[Math.floor(s.length / 2)], max: s[s.length - 1] };
+}
+// ==/CORE==
+</script>
+<script>
+(() => {
+  const REPO = 'https://huggingface.co/diffusionstudio/sam2.1-tiny-video-onnx-fp16/resolve/main/';
+  const FILES = ['vision_encoder', 'mask_decoder', 'memory_encoder', 'memory_attention', 'pointer_tpos'];
+  const CACHE = 'sam2-spike-v1';
+  const RUNKEY = 'sam2spike.run';
+  const $ = id => document.getElementById(id);
+  const R = {};                  // レポート用
+  const sess = {};               // ONNX セッション
+  let consts = null, backend = '';
+  let modelReady = false;
+
+  // ---------- ユーティリティ ----------
+  const ms = v => Number.isFinite(v) ? v.toFixed(0) + ' ms' : '—';
+  const sec = v => (v / 1000).toFixed(1) + ' 秒';
+  function setList(el, pairs) {
+    el.replaceChildren(...pairs.flatMap(([k, v]) => { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); dd.textContent = v; return [dt, dd]; }));
+  }
+  function setState(el, text, cls) { el.textContent = text; el.className = 'state' + (cls ? ' ' + cls : ''); }
+  function lsGet(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+
+  function f16ToF32(h) {
+    const s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
+    if (e === 0) return s * Math.pow(2, -14) * (f / 1024);
+    if (e === 31) return f ? NaN : s * Infinity;
+    return s * Math.pow(2, e - 15) * (1 + f / 1024);
+  }
+  function f32ToF16(v) {
+    const b = new Float32Array(1), u = new Uint32Array(b.buffer); b[0] = v;
+    const x = u[0], sign = (x >> 16) & 0x8000; let e = ((x >> 23) & 0xff) - 112, m = x & 0x7fffff;
+    if (e <= 0) return sign; if (e >= 31) return sign | 0x7c00;
+    return sign | (e << 10) | (m >> 13);
+  }
+  function asF32(t) {
+    const d = t.data;
+    if (d instanceof Float32Array) return d;
+    if (d instanceof Uint16Array) return Float32Array.from(d, f16ToF32);   // fp16 を生ビットで受けた場合
+    return Float32Array.from(d, Number);                                    // Float16Array など
+  }
+
+  // 入力メタデータを見て dtype と形を合わせる
+  function tensor(s, name, data, dims) {
+    const md = s.meta[name] || {};
+    const type = md.type || 'float32';
+    if (md.shape && md.shape.every(d => typeof d === 'number') && md.shape.reduce((a, b) => a * b, 1) === data.length) dims = md.shape;
+    let arr;
+    if (type === 'float32') arr = data instanceof Float32Array ? data : Float32Array.from(data);
+    else if (type === 'float16') arr = Uint16Array.from(data, f32ToF16);
+    else if (type === 'int32') arr = Int32Array.from(data, Math.round);
+    else if (type === 'int64') arr = BigInt64Array.from(data, v => BigInt(Math.round(v)));
+    else if (type === 'bool') arr = Uint8Array.from(data, v => v ? 1 : 0);
+    else throw new Error(`${name}: 未対応の型 ${type}`);
+    return new ort.Tensor(type, arr, dims);
+  }
+  async function run(key, feeds) {
+    const s = sess[key];
+    try { return await s.run(feeds); }
+    catch (e) { throw new Error(`${key} 実行失敗: ${e.message}\n入力: ${s.inputNames.join(', ')}\n出力: ${s.outputNames.join(', ')}`); }
+  }
+  function pick(out, name, key) {
+    if (!(name in out)) throw new Error(`${key} に出力 ${name} がない。実際の出力: ${Object.keys(out).join(', ')}`);
+    return out[name];
+  }
+
+  // ---------- 1. 環境 ----------
+  async function checkEnv() {
+    const pairs = [['ブラウザ', navigator.userAgent]];
+    R.ua = navigator.userAgent;
+    R.webgpu = !!navigator.gpu;
+    R.f16 = false;
+    if (navigator.gpu) {
+      try {
+        const ad = await navigator.gpu.requestAdapter();
+        if (ad) {
+          R.f16 = ad.features.has('shader-f16');
+          R.maxBuf = ad.limits.maxStorageBufferBindingSize;
+          const info = ad.info || {};
+          R.gpu = [info.vendor, info.architecture, info.device].filter(Boolean).join(' / ') || '不明';
+          pairs.push(['WebGPU', 'あり'], ['GPU', R.gpu], ['shader-f16', R.f16 ? 'あり' : 'なし'], ['最大バッファ', (R.maxBuf / 1048576).toFixed(0) + ' MB']);
+        } else { R.webgpu = false; pairs.push(['WebGPU', 'API はあるがアダプタ取得に失敗']); }
+      } catch (e) { R.webgpu = false; pairs.push(['WebGPU', '失敗: ' + e.message]); }
+    } else pairs.push(['WebGPU', 'なし（CPU / WASM で実行。iOS 26 未満ではこちら）']);
+    backend = R.webgpu ? 'webgpu' : 'wasm';
+    R.backend = backend;
+    pairs.push(['実行方式', backend]);
+    setList($('envList'), pairs);
+    setState($('envState'), R.webgpu ? 'WebGPU' : 'CPU のみ', R.webgpu ? 'ok' : 'warn');
+  }
+
+  // ---------- 2. モデル ----------
+  async function fetchCached(url, onBytes) {
+    let cache = null;
+    try { cache = await caches.open(CACHE); } catch {}
+    if (cache) {
+      const hit = await cache.match(url);
+      if (hit) { const b = await hit.arrayBuffer(); onBytes(b.byteLength); return { buf: b, cached: true }; }
+    }
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`${url} の取得に失敗 (${res.status})`);
+    const reader = res.body.getReader(); const chunks = []; let n = 0;
+    for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); n += value.length; onBytes(value.length); }
+    const buf = new Uint8Array(n); let o = 0; for (const c of chunks) { buf.set(c, o); o += c.length; }
+    if (cache) { try { await cache.put(url, new Response(buf.slice().buffer)); } catch (e) { R.cacheErr = e.message; } }
+    return { buf: buf.buffer, cached: false };
+  }
+
+  async function loadModels() {
+    const TOTAL = 83.2 * 1048576;
+    let got = 0;
+    const bump = n => { got += n; $('modelBar').style.width = Math.min(100, got / TOTAL * 100).toFixed(1) + '%'; setState($('modelState'), `${(got / 1048576).toFixed(1)} / 83 MB`); };
+    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
+    ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
+    const t0 = performance.now();
+    try {
+      consts = await (await fetch(REPO + 'constants.json')).json();
+      let allCached = true, dlMs = 0, createMs = 0;
+      for (const f of FILES) {
+        const a = performance.now();
+        const { buf, cached } = await fetchCached(REPO + 'onnx/' + f + '.onnx', bump);
+        allCached &&= cached;
+        const b = performance.now(); dlMs += b - a;
+        setState($('modelState'), `${f} を準備中`);
+        const s = await ort.InferenceSession.create(buf, { executionProviders: [backend], graphOptimizationLevel: 'all' });
+        s.meta = {};
+        (s.inputMetadata || []).forEach(m => { s.meta[m.name] = m; });
+        sess[f] = s;
+        createMs += performance.now() - b;
+      }
+      R.model = { fromCache: allCached, readMs: dlMs, createMs, totalMs: performance.now() - t0 };
+      setList($('modelList'), [
+        ['読み込み元', allCached ? 'キャッシュ（2回目以降）' : 'ネットワーク（初回）'],
+        ['取得', sec(dlMs)], ['セッション作成', sec(createMs)], ['合計', sec(R.model.totalMs)],
+        ...(R.cacheErr ? [['キャッシュ保存', '失敗: ' + R.cacheErr]] : []),
+      ]);
+      setState($('modelState'), '準備完了', 'ok');
+      $('modelBar').style.width = '100%';
+      modelReady = true;
+      refreshStart();
+      if (frame0Ready && points.length) segmentSeed();
+    } catch (e) {
+      setState($('modelState'), '失敗', 'bad');
+      setList($('modelList'), [['エラー', e.message]]);
+      R.modelError = e.message;
+      writeReport();
+    }
+  }
+
+  $('clearCache').onclick = async () => {
+    try { await caches.delete(CACHE); } catch {}
+    location.reload();
+  };
+
+  // ---------- 3. 動画 ----------
+  const video = $('video');
+  const view = $('view'), vctx = view.getContext('2d');
+  const inCanvas = document.createElement('canvas'); inCanvas.width = inCanvas.height = 512;
+  const ictx = inCanvas.getContext('2d', { willReadFrequently: true });
+  let frame0Ready = false, totalFrames = 0, fps = 15;
+
+  function seekTo(t) {
+    return new Promise((res, rej) => {
+      if (Math.abs(video.currentTime - t) < 1e-4 && video.readyState >= 2) { res(); return; }   // 同じ位置だと seeked が来ない
+      const done = () => { clearTimeout(timer); video.removeEventListener('seeked', done); res(); };
+      const timer = setTimeout(() => { video.removeEventListener('seeked', done); rej(new Error(`シーク ${t.toFixed(2)}s がタイムアウト`)); }, 8000);
+      video.addEventListener('seeked', done);
+      video.currentTime = t;
+    });
+  }
+  function frameTime(i) { return Math.min(i / fps + 0.001, Math.max(0, video.duration - 0.05)); }
+
+  $('file').onchange = async () => {
+    const f = $('file').files[0];
+    if (!f) return;
+    frame0Ready = false; points = []; seedOut = null; refreshStart();
+    video.src = URL.createObjectURL(f);
+    await new Promise((res, rej) => { video.onloadedmetadata = res; video.onerror = () => rej(new Error('この動画を開けません')); }).catch(e => { setState($('videoState'), e.message, 'bad'); throw e; });
+    setupFrames();
+    view.width = Math.min(video.videoWidth, 720);
+    view.height = Math.round(view.width * video.videoHeight / video.videoWidth);
+    R.video = { w: video.videoWidth, h: video.videoHeight, dur: video.duration, sizeMB: f.size / 1048576, type: f.type, frames: totalFrames };
+    setList($('videoList'), [['解像度', `${video.videoWidth}×${video.videoHeight}`], ['長さ', video.duration.toFixed(1) + ' 秒'], ['サイズ', (f.size / 1048576).toFixed(1) + ' MB'], ['処理フレーム数', String(totalFrames)]]);
+    setState($('videoState'), '読み込み済み', 'ok');
+    await seekTo(0.001);
+    drawView(null);
+    frame0Ready = true;
+    setState($('targetState'), '対象をタップ');
+  };
+  function setupFrames() {
+    fps = Number($('fps').value);
+    totalFrames = Math.max(2, Math.floor(Math.min(video.duration, Number($('secs').value)) * fps));
+    if (R.video) R.video.frames = totalFrames;
+  }
+  $('fps').onchange = $('secs').onchange = () => { if (video.duration) { setupFrames(); setList($('videoList'), [['解像度', `${video.videoWidth}×${video.videoHeight}`], ['長さ', video.duration.toFixed(1) + ' 秒'], ['処理フレーム数', String(totalFrames)]]); } };
+
+  // ---------- 4. 対象の指定 ----------
+  let points = [], mode = 1, seedEnc = null, seedOut = null, seedBusy = false;
+  const maskCanvas = document.createElement('canvas'); maskCanvas.width = maskCanvas.height = 256;
+  const mctx = maskCanvas.getContext('2d');
+  const tmp = document.createElement('canvas');
+
+  function setMode(m) { mode = m; $('modePos').setAttribute('aria-pressed', m === 1); $('modeNeg').setAttribute('aria-pressed', m === 0); }
+  $('modePos').onclick = () => setMode(1);
+  $('modeNeg').onclick = () => setMode(0);
+  $('resetPts').onclick = () => { points = []; seedOut = null; drawView(null); refreshStart(); };
+
+  view.addEventListener('click', ev => {
+    if (!frame0Ready || running) return;
+    const r = view.getBoundingClientRect();
+    points.push({ x: (ev.clientX - r.left) / r.width, y: (ev.clientY - r.top) / r.height, l: mode });
+    drawView(seedOut && seedOut.mask);
+    if (modelReady) segmentSeed(); else setState($('targetState'), 'モデル準備待ち…', 'warn');
+  });
+
+  function drawView(mask256) {
+    const W = view.width, H = view.height;
+    vctx.globalCompositeOperation = 'source-over';
+    if (mask256 && $('showMode').value === 'green') {
+      tmp.width = W; tmp.height = H; const t = tmp.getContext('2d');
+      t.globalCompositeOperation = 'source-over'; t.clearRect(0, 0, W, H);
+      t.drawImage(video, 0, 0, W, H);
+      paintMask(mask256, [255, 255, 255], 255);
+      t.globalCompositeOperation = 'destination-in'; t.imageSmoothingEnabled = true; t.drawImage(maskCanvas, 0, 0, W, H);
+      vctx.fillStyle = '#00b140'; vctx.fillRect(0, 0, W, H);
+      vctx.drawImage(tmp, 0, 0);
+    } else {
+      vctx.drawImage(video, 0, 0, W, H);
+      if (mask256) { paintMask(mask256, [0, 220, 90], 130); vctx.drawImage(maskCanvas, 0, 0, W, H); }
+    }
+    if (!running) for (const p of points) {
+      vctx.beginPath(); vctx.arc(p.x * W, p.y * H, Math.max(6, W / 90), 0, Math.PI * 2);
+      vctx.fillStyle = p.l ? '#00c853' : '#ff3b3b'; vctx.fill();
+      vctx.lineWidth = 2; vctx.strokeStyle = '#fff'; vctx.stroke();
+    }
+  }
+  function paintMask(mask, rgb, a) {
+    const img = mctx.createImageData(256, 256);
+    for (let i = 0; i < 65536; i++) { const on = mask[i]; img.data[i * 4] = rgb[0]; img.data[i * 4 + 1] = rgb[1]; img.data[i * 4 + 2] = rgb[2]; img.data[i * 4 + 3] = on ? a : 0; }
+    mctx.putImageData(img, 0, 0);
+  }
+  $('showMode').onchange = () => { if (!running) drawView(currentMask()); };
+  function currentMask() { return scrubMasks.length ? scrubMasks[Number($('scrub').value)] : seedOut && seedOut.mask; }
+
+  function grabPixels() {
+    ictx.drawImage(video, 0, 0, 512, 512);
+    return toPixelValues(ictx.getImageData(0, 0, 512, 512).data, consts.image_mean, consts.image_std);
+  }
+  async function encode() {
+    const pix = grabPixels();
+    const out = await run('vision_encoder', { pixel_values: tensor(sess.vision_encoder, 'pixel_values', pix, [1, 3, 512, 512]) });
+    return {
+      feats0: pick(out, 'feats0', 'vision_encoder'), feats1: pick(out, 'feats1', 'vision_encoder'),
+      feats2: asF32(pick(out, 'feats2', 'vision_encoder')), feats2NoMem: asF32(pick(out, 'feats2_no_mem', 'vision_encoder')),
+      vpos: asF32(pick(out, 'vision_pos_embed', 'vision_encoder')),
+    };
+  }
+  async function decode(enc, featsCond, pts) {
+    const coords = [], labels = [];
+    for (const p of pts) { coords.push(p.x * 512, p.y * 512); labels.push(p.l); }
+    coords.push(0, 0); labels.push(-1);           // 箱なしのときの SAM の詰め点
+    const N = labels.length, d = sess.mask_decoder;
+    const out = await run('mask_decoder', {
+      feats0: enc.feats0, feats1: enc.feats1,
+      feats2_cond: tensor(d, 'feats2_cond', featsCond, [1, 256, F, F]),
+      input_points: tensor(d, 'input_points', coords, [1, 1, N, 2]),
+      input_labels: tensor(d, 'input_labels', labels, [1, 1, N]),
+    });
+    const low = asF32(pick(out, 'low_res_mask', 'mask_decoder'));
+    const mask = new Uint8Array(65536); let area = 0;
+    for (let i = 0; i < 65536; i++) if (low[i] > 0) { mask[i] = 1; area++; }
+    return {
+      mask, area, highRes: asF32(pick(out, 'high_res_mask', 'mask_decoder')),
+      score: asF32(pick(out, 'object_score_logits', 'mask_decoder'))[0],
+      ptr: asF32(pick(out, 'object_pointer', 'mask_decoder')).slice(0, 256),
+    };
+  }
+  async function memEncode(feats2, dec, binarize) {
+    const m = sess.memory_encoder;
+    const out = await run('memory_encoder', {
+      feats2: tensor(m, 'feats2', feats2, [1, 256, F, F]),
+      high_res_mask: tensor(m, 'high_res_mask', dec.highRes, [1, 1, 512, 512]),
+      object_score_logits: tensor(m, 'object_score_logits', [dec.score], [1, 1]),
+      binarize: tensor(m, 'binarize', [binarize], []),
+    });
+    return { tokens: asF32(pick(out, 'memory_tokens', 'memory_encoder')), pos: asF32(pick(out, 'memory_pos', 'memory_encoder')) };
+  }
+
+  async function segmentSeed() {
+    if (seedBusy || !points.length) return;
+    seedBusy = true;
+    try {
+      setState($('targetState'), '推論中…');
+      const t0 = performance.now();
+      if (!seedEnc || seedEnc.src !== video.src) { seedEnc = await encode(); seedEnc.src = video.src; R.seedEncMs = performance.now() - t0; }
+      const t1 = performance.now();
+      seedOut = await decode(seedEnc, seedEnc.feats2NoMem, points);
+      R.seedDecMs = performance.now() - t1;
+      drawView(seedOut.mask);
+      setState($('targetState'), `マスク ${(seedOut.area / 655.36).toFixed(1)}%（エンコード ${ms(R.seedEncMs)} / デコード ${ms(R.seedDecMs)}）`, 'ok');
+    } catch (e) { setState($('targetState'), '失敗', 'bad'); R.seedError = e.message; writeReport(); alertBox(e.message); }
+    finally { seedBusy = false; refreshStart(); }
+  }
+
+  // ---------- 5. トラッキング ----------
+  let running = false, stopFlag = false, scrubMasks = [];
+  function refreshStart() { $('start').disabled = !(modelReady && frame0Ready && seedOut && !running); }
+
+  $('stop').onclick = () => { stopFlag = true; };
+  $('start').onclick = async () => {
+    setupFrames();
+    running = true; stopFlag = false; refreshStart(); $('stop').disabled = false; $('scrub').hidden = true;
+    const tpos = consts.memory_temporal_positional_encoding;
+    const recent = new Map(), recentPtrs = new Map();
+    const T = { seek: [], enc: [], attn: [], dec: [], menc: [], frame: [] };
+    const masks = [seedOut.mask];
+    const startedAt = performance.now();
+    lsSet(RUNKEY, { status: 'running', frame: 0, total: totalFrames, at: Date.now() });
+    try {
+      await seekTo(frameTime(0));
+      const enc0 = seedEnc.src === video.src ? seedEnc : await encode();
+      const cm = await memEncode(enc0.feats2, seedOut, 1);
+      const cond = { frame: 0, tokens: cm.tokens, pos: cm.pos, ptr: seedOut.ptr };
+      let lost = 0;
+      for (let i = 1; i < totalFrames && !stopFlag; i++) {
+        const f0 = performance.now();
+        await seekTo(frameTime(i)); const f1 = performance.now();
+        const enc = await encode(); const f2 = performance.now();
+        const { mem, pos, R: Rlen } = assembleMemory(i, cond, recent, tpos);
+        const pl = pointerList(i, totalFrames, cond, recentPtrs);
+        const pt = await run('pointer_tpos', { normalized_diffs: tensor(sess.pointer_tpos, 'normalized_diffs', pl.diffs, [16]) });
+        writePointers(pl.list, asF32(pick(pt, 'pointer_pos', 'pointer_tpos')), mem, pos, Rlen);
+        const a = sess.memory_attention, L = Rlen + 64;
+        const att = await run('memory_attention', {
+          current_vision_features: tensor(a, 'current_vision_features', chwToTokens(enc.feats2, 256), [F2, 1, 256]),
+          current_vision_position_embeddings: tensor(a, 'current_vision_position_embeddings', chwToTokens(enc.vpos, 256), [F2, 1, 256]),
+          memory: tensor(a, 'memory', mem, [L, 1, 64]),
+          memory_pos: tensor(a, 'memory_pos', pos, [L, 1, 64]),
+        });
+        const f3 = performance.now();
+        const dec = await decode(enc, asF32(pick(att, 'conditioned_feats', 'memory_attention')), []);
+        const f4 = performance.now();
+        const me = await memEncode(enc.feats2, dec, 0);
+        const f5 = performance.now();
+        recent.set(i, { tokens: me.tokens, pos: me.pos }); recentPtrs.set(i, dec.ptr);
+        recent.delete(i - 7); recentPtrs.delete(i - MAX_PTRS);
+        if (dec.score <= 0) lost++;
+        masks.push(dec.mask);
+        T.seek.push(f1 - f0); T.enc.push(f2 - f1); T.attn.push(f3 - f2); T.dec.push(f4 - f3); T.menc.push(f5 - f4); T.frame.push(f5 - f0);
+        drawView(dec.mask);
+        $('runBar').style.width = ((i + 1) / totalFrames * 100).toFixed(1) + '%';
+        const steady = stats(T.frame.slice(1));
+        const eta = (totalFrames - 1 - i) * (steady.avg || T.frame[0]);
+        setState($('runState'), `${i + 1} / ${totalFrames}`);
+        setList($('runList'), [['1フレーム（平均）', ms(steady.avg)], ['残り', sec(eta)], ['対象を見失ったフレーム', String(lost)]]);
+        lsSet(RUNKEY, { status: 'running', frame: i + 1, total: totalFrames, at: Date.now() });
+        R.track = { T, done: i + 1, total: totalFrames, wallMs: performance.now() - startedAt, lost, fps };
+      }
+      R.track && (R.track.stopped = stopFlag);
+      lsSet(RUNKEY, { status: 'done' });
+      setState($('runState'), stopFlag ? '中止' : '完了', stopFlag ? 'warn' : 'ok');
+    } catch (e) {
+      lsSet(RUNKEY, { status: 'error' });
+      R.trackError = e.message; setState($('runState'), '失敗', 'bad'); alertBox(e.message);
+    } finally {
+      running = false; $('stop').disabled = true; refreshStart();
+      scrubMasks = masks;
+      const sc = $('scrub'); sc.max = String(masks.length - 1); sc.value = '0'; sc.hidden = masks.length < 2;
+      writeReport();
+    }
+  };
+  $('scrub').oninput = async () => {
+    const i = Number($('scrub').value);
+    await seekTo(frameTime(i)); drawView(scrubMasks[i]);
+  };
+
+  // ---------- 6. レポート ----------
+  function writeReport() {
+    const L = [];
+    L.push('# SAM2 動画スパイク結果', `日時: ${new Date().toLocaleString('ja-JP')}`, `UA: ${R.ua}`);
+    L.push(`WebGPU: ${R.webgpu ? 'あり' : 'なし'} / shader-f16: ${R.f16 ? 'あり' : 'なし'} / GPU: ${R.gpu || '-'} / 実行方式: ${R.backend}`);
+    if (R.model) L.push(`モデル: ${R.model.fromCache ? 'キャッシュ' : 'ネットワーク'} 取得 ${sec(R.model.readMs)} + セッション作成 ${sec(R.model.createMs)} = ${sec(R.model.totalMs)}`);
+    if (R.modelError) L.push(`モデル読み込みエラー: ${R.modelError}`);
+    if (R.video) L.push(`動画: ${R.video.w}x${R.video.h} ${R.video.dur.toFixed(1)}秒 ${R.video.sizeMB.toFixed(1)}MB ${R.video.type} / 処理 ${R.video.frames}フレーム @${fps}fps`);
+    if (R.seedEncMs) L.push(`最初のタップ: エンコード ${ms(R.seedEncMs)} / デコード ${ms(R.seedDecMs)}`);
+    if (R.seedError) L.push(`タップ時エラー: ${R.seedError}`);
+    if (R.track) {
+      const t = R.track, st = k => stats(t.T[k].slice(1));
+      L.push(`トラッキング: ${t.done}/${t.total} フレーム ${t.stopped ? '(中止)' : ''} / 全体 ${sec(t.wallMs)} / 見失い ${t.lost}`);
+      L.push(`初回フレーム(シェーダ準備込み): ${ms(t.T.frame[0])}`);
+      for (const [k, n] of [['frame', '1フレーム合計'], ['seek', 'シーク'], ['enc', '画像エンコーダ'], ['attn', 'メモリ注意'], ['dec', 'マスクデコーダ'], ['menc', 'メモリエンコーダ']]) {
+        const s = st(k); L.push(`  ${n}: 平均 ${ms(s.avg)} / 中央値 ${ms(s.p50)} / 最大 ${ms(s.max)}`);
+      }
+      const per = st('frame').avg;
+      if (per) L.push(`→ 10秒・30fps(300フレーム)なら約 ${sec(per * 300)}、15fps なら約 ${sec(per * 150)}`);
+    }
+    if (R.trackError) L.push(`トラッキングエラー: ${R.trackError}`);
+    if (R.crash) L.push(`前回の実行: ${R.crash}`);
+    $('report').value = L.join('\n');
+  }
+  $('copy').onclick = async () => {
+    writeReport();
+    try { await navigator.clipboard.writeText($('report').value); $('copied').textContent = 'コピーしました'; }
+    catch { $('report').select(); $('copied').textContent = '選択しました。手動でコピーしてください'; }
+  };
+  function alertBox(msg) { const el = $('crashNote'); el.textContent = msg; el.hidden = false; }
+
+  // ---------- 起動 ----------
+  const prev = lsGet(RUNKEY);
+  if (prev && prev.status === 'running') {
+    R.crash = `${prev.frame}/${prev.total} フレームで途中終了（タブがメモリ不足で再読み込みされた可能性）`;
+    alertBox('前回のトラッキングが ' + R.crash + '。');
+    lsSet(RUNKEY, { status: 'reported' });
+  }
+  (async () => {
+    if (!window.ort) { setState($('modelState'), 'ONNX Runtime を読み込めません', 'bad'); return; }
+    await checkEnv();
+    writeReport();
+    loadModels();
+  })();
+})();
+</script>
+</body>
+</html>
+
